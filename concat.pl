@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 #
-# perl finder.pl --verbose --src=./src --reject-dir=./src/examples --reject-dir=./src/tests
+# perl concat.pl --verbose --src=../src --reject-dir=../src/examples --reject-dir=../src/tests --reject-file=../src/files_com.c --reject-file=../src/files_com.h  --dest=../src --target=files_com
 
 use strict;
 use warnings FATAL => 'all';
@@ -79,8 +79,11 @@ sub load_code {
 
     my @includes = ();
     foreach my $line (@lines) {
-        if ($line =~ m/^#include\s+(<|")([^">]+)("|>)/) {
-            push(@includes, "$1$2$3");
+        if ($line =~ m/^#include\s+(<|")([^">]+)("|>)(\s*\/\/\/*\s*PRECEDED\s+BY\s*:\s*(.*))?/) {
+            if (defined($4)) {
+                push(@includes, ">${5}")
+            }
+            push(@includes, "${1}${2}${3}");
         } else {
             push(@{$out_code}, $line);
         }
@@ -237,16 +240,19 @@ my @cli_reject_dir;
 my @cli_reject_file;
 my $cli_verbose;
 my $cli_destination;
+my $cli_target;
 
 if (! GetOptions (
     'src=s'         => \@cli_src,
     'reject-dir=s'  => \@cli_reject_dir,
     'reject-file=s' => \@cli_reject_file,
     'dest=s'        => \$cli_destination,
+    'target=s'      => \$cli_target,
     'verbose'       => \$cli_verbose)) {
     error("invalid command line");
 }
 $cli_verbose = defined($cli_verbose) ? 1 : 0;
+$cli_target = defined($cli_target) ? $cli_target : &TARGET_BASENAME;
 $cli_destination = rel2abs(defined($cli_destination) ? $cli_destination : &DEFAULT_DESTINATION);
 
 error('Option --src is missing') if (int(@cli_src) == 0);
@@ -259,6 +265,7 @@ if (0 != $cli_verbose) {
         foreach my $dir (@cli_reject_dir) { printf("   - \"%s\"\n", $dir) }
     }
     printf("destination: \"%s\"\n", $cli_destination);
+    printf("target: \"%s\"\n", $cli_target);
 }
 
 # Select the files to concatenate.
@@ -335,7 +342,7 @@ foreach my $path (@H_FILES) {
 
 # Load the C files.
 print("Load C files:\n");
-$max_len = array_max_string_length(@H_FILES);
+$max_len = array_max_string_length(@C_FILES);
 foreach my $path (@C_FILES) {
     my @code;
     my $data = load_code($path, \@code);
@@ -355,6 +362,7 @@ my @lines;
 my @ranks;
 my $output_file;
 my @includes;
+my @before_includes;
 
 # ====================================================================================
 # Concatenate the H exposed files.
@@ -377,7 +385,7 @@ foreach my $rank (@ranks) {
     push(@lines, sprintf("\n/* --- [end of exposed header file - rank %d] --- */\n\n", $rank));
 }
 
-$output_file = catfile($cli_destination, &TARGET_BASENAME . '.h');
+$output_file = catfile($cli_destination, $cli_target . '.h');
 error('cannot write H file "%s": %s', $output_file) if 0 == write_code($output_file, join('', @lines));
 
 # ====================================================================================
@@ -392,9 +400,21 @@ error('cannot write H file "%s": %s', $output_file) if 0 == write_code($output_f
 
 # (1) the "#include" statements (for the H files and the C files).
 my %all_include = (%C_INCLUDES, %H_UNRANKED_INCLUDES, %H_RANKED_INCLUDES);
-@includes = map { sprintf("%s#include %s\n", $_ =~ m/"/ ? '// ' : '', $_) } sort keys %all_include;
-push(@lines, @includes);
-push(@lines, sprintf('#include "%s"', &TARGET_BASENAME), '', '');
+@includes = ();
+@before_includes = ();
+foreach my $line (sort keys %all_include) {
+    if ($line =~ m/^>(.+)$/) {
+        # We found a statement that must precede an "#include" statement.
+        push(@before_includes, "${1}\n");
+    } else {
+        push(@includes, sprintf("%s#include %s\n", $line =~ m/"/ ? '// ' : '', $line));
+    }
+}
+
+# @includes = map { $r = sprintf("%s#include %s\n", $_ =~ m/"/ ? '// ' : '', $_) } sort keys %all_include;
+push(@lines, @before_includes, @includes);
+
+push(@lines, sprintf('#include "%s.h"', $cli_target), '', '');
 
 # (2) the (non-exposed) ranked H files (which inclusion order matters).
 @ranks = sort { $a <=> $b } keys %H_RANKED_LINES;
@@ -415,7 +435,7 @@ push(@lines, "\n/* --- [C files] --- */\n\n");
 push(@lines, @C_LINES);
 push(@lines, "\n/* --- [end of C files] --- */\n\n");
 
-$output_file = catfile($cli_destination, &TARGET_BASENAME . '.c');
+$output_file = catfile($cli_destination, $cli_target . '.c');
 error('cannot write C file "%s": %s', $output_file) if 0 == write_code($output_file, join('', @lines));
 
 
